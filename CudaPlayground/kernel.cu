@@ -7,7 +7,7 @@
 #include "helper_cuda.h"
 #include "helper_string.h"
 #if MY_CUDA_ARCH_IDENTIFIER >= 800 // assuming 3090
-#define N 85983232
+#define N 687865856
 #define NUM_CASCADING 8
 #define NUM_PARTITION 256 // each arry occupies 2.5625MB
 #define GRIDDIM 82
@@ -51,9 +51,9 @@ __global__ void shortKernel(float* vector_d, float* in_d) {
 
 template <int NPARTITION, int NCASCADING, int NLEN>
 __global__ void shortKernel_merged(float* vectors_d[NCASCADING+1], int ipartition) {
-	int idx = blockIdx.x * blockDim.x + threadIdx.x +ipartition*N/NPARTITION;
+	int idx = blockIdx.x * blockDim.x + threadIdx.x +ipartition*NLEN/NPARTITION;
 	for (int i_cascading = 0; i_cascading < NCASCADING; i_cascading++) {
-		for (int curr_idx = idx; curr_idx < NLEN *N / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
+		for (int curr_idx = idx; curr_idx < (ipartition+1) *NLEN / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
 			vectors_d[i_cascading+1][curr_idx] = 1.23 * vectors_d[i_cascading][curr_idx];
 		}
 	}
@@ -61,9 +61,9 @@ __global__ void shortKernel_merged(float* vectors_d[NCASCADING+1], int ipartitio
 
 template <int NPARTITION, int NCASCADING, int NLEN>
 __global__ void shortKernel_merged_optimized(float* vectors_d[NCASCADING+1], int ipartition) {
-	int idx = blockIdx.x * blockDim.x + threadIdx.x +ipartition*N/NPARTITION;
+	int idx = blockIdx.x * blockDim.x + threadIdx.x +ipartition*NLEN/NPARTITION;
 	for (int i_cascading = 0; i_cascading < NCASCADING; i_cascading++) {
-		for (int curr_idx = idx; curr_idx < NLEN *N / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
+		for (int curr_idx = idx; curr_idx < (ipartition+1) *NLEN / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
 			__stcg(&vectors_d[i_cascading+1][curr_idx], 1.23 * __ldlu(&vectors_d[i_cascading][curr_idx]));
 		}
 	}
@@ -243,7 +243,7 @@ int __main2() {
 	StopWatchInterface* timerExec = NULL;
 	sdkCreateTimer(&timerExec);
 	sdkStartTimer(&timerExec);
-	for (int ipartition = 1; ipartition < NPARTITION; ipartition++) {
+	for (int ipartition = 0; ipartition < NPARTITION; ipartition++) {
 		checkCudaErrors(cudaStreamSynchronize(0));
 		if constexpr(FLAG_OPTIMIZATION){
 			shortKernel_merged_optimized<NPARTITION, NUM_CASCADING, N><<<GRIDDIM,1024>>>(vectors_d_d, ipartition);
