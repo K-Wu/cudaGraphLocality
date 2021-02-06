@@ -55,7 +55,7 @@
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
-      <CodeGeneration>compute_70,sm_70;compute_75,sm_75;compute_80,sm_80;compute_86,sm_86;%(CodeGeneration)</CodeGeneration>
+      <CodeGeneration>compute_70,sm_70;compute_75,sm_75;compute_80,sm_80;%(CodeGeneration)</CodeGeneration>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
@@ -75,7 +75,7 @@
     </Link>
     <CudaCompile>
       <TargetMachinePlatform>64</TargetMachinePlatform>
-      <CodeGeneration>compute_70,sm_70;compute_75,sm_75;compute_80,sm_80;compute_86,sm_86;%(CodeGeneration)</CodeGeneration>
+      <CodeGeneration>compute_70,sm_70;compute_75,sm_75;%(CodeGeneration)</CodeGeneration>
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
