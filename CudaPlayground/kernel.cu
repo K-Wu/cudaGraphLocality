@@ -9,7 +9,7 @@
 #if MY_CUDA_ARCH_IDENTIFIER >= 800 // assuming 3090
 #define N 687865856
 #define NUM_CASCADING 8
-#define NUM_PARTITION 256 // each arry occupies 2.5625MB
+#define NUM_PARTITION 2048 // each arry occupies 1.28125MB
 #define GRIDDIM 82
 #else
 #define N 50000000 //assuming 2070max-q
@@ -127,6 +127,10 @@ int __main_01() {
 	StopWatchInterface* timerExec = NULL;
 	sdkCreateTimer(&timerExec);
 	sdkStartTimer(&timerExec);
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+	cudaEventRecord(start);
 //first iteration of ipartition: create graph then execute
 	for (int iCascade = 0; iCascade < NCASCADING; iCascade++) {
 		std::vector<cudaGraphNode_t> node_dependencies;
@@ -169,7 +173,6 @@ int __main_01() {
 	checkCudaErrors(cudaGraphInstantiate(&instance, graph, NULL, NULL, 0));
 	checkCudaErrors(cudaGraphLaunch(instance, stream));
 	checkCudaErrors(cudaStreamSynchronize(stream));
-
 	for (int ipartition = 1; ipartition < NPARTITION; ipartition++) {
 		for (int iCascade = 0; iCascade < NCASCADING; iCascade++) {
 			//replace parameter
@@ -218,9 +221,14 @@ int __main_01() {
 		checkCudaErrors(cudaGraphLaunch(instance, stream));
 		checkCudaErrors(cudaStreamSynchronize(stream));
 	}
+	cudaEventRecord(stop);
 
 	sdkStopTimer(&timerExec);
 	printf("Execution time: %f (ms)\n", sdkGetTimerValue(&timerExec));
+	cudaEventSynchronize(stop);
+	float milliseconds = 0;
+	cudaEventElapsedTime(&milliseconds, start, stop);
+	printf("Execution time (GPU): %f (ms)\n", milliseconds);
 	checkCudaErrors(cudaGraphExecDestroy(instance));
 	checkCudaErrors(cudaGraphDestroy(graph));
 	checkCudaErrors(cudaStreamDestroy(stream));
@@ -250,7 +258,7 @@ int main4() {
 	return __main_01<1, NUM_CASCADING, true>();
 }
 
-template <int NPARTITION, int NCASCADING, bool FLAG_OPTIMIZATION>
+template <int NPARTITION, int NCASCADING, bool FLAG_OPTIMIZATION, bool FLAG_BASELINE>
 int __main2() {
 	float* input;
 	input = (float*)malloc(sizeof(float) * N);
@@ -264,20 +272,36 @@ int __main2() {
 	checkCudaErrors(cudaMemcpy(vectors_d[0], input, sizeof(float) * N, cudaMemcpyHostToDevice));
 	checkCudaErrors(cudaMemcpy(vectors_d_d, vectors_d, sizeof(float*) * (NCASCADING + 1), cudaMemcpyHostToDevice));
 	checkCudaErrors(cudaStreamSynchronize(0));
+	cudaEvent_t start, stop;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
 	StopWatchInterface* timerExec = NULL;
 	sdkCreateTimer(&timerExec);
 	sdkStartTimer(&timerExec);
+	cudaEventRecord(start);
 	for (int ipartition = 0; ipartition < NPARTITION; ipartition++) {
-		if constexpr(FLAG_OPTIMIZATION){
-			shortKernel_merged_optimized<NPARTITION, NUM_CASCADING, N><<<GRIDDIM,1024>>>(vectors_d_d, ipartition);
+		if constexpr(FLAG_BASELINE){
+			for (int i_cascading=0;i_cascading<NCASCADING;i_cascading++){
+				shortKernel<NPARTITION, N><<<GRIDDIM,1024>>>(&vectors_d[i_cascading+1][N/NPARTITION*ipartition],&vectors_d[i_cascading+0][N/NPARTITION*ipartition]);
+			}
 		}
 		else{
-			shortKernel_merged<NPARTITION, NUM_CASCADING, N><<<GRIDDIM,1024>>>(vectors_d_d, ipartition);
+			if constexpr(FLAG_OPTIMIZATION){
+				shortKernel_merged_optimized<NPARTITION, NUM_CASCADING, N><<<GRIDDIM,1024>>>(vectors_d_d, ipartition);
+			}
+			else{
+				shortKernel_merged<NPARTITION, NUM_CASCADING, N><<<GRIDDIM,1024>>>(vectors_d_d, ipartition);
+			}
 		}
 	}
+	cudaEventRecord(stop);
 	checkCudaErrors(cudaStreamSynchronize(0));
 	sdkStopTimer(&timerExec);
 	printf("Execution time: %f (ms)\n", sdkGetTimerValue(&timerExec));
+	cudaEventSynchronize(stop);
+	float milliseconds = 0;
+	cudaEventElapsedTime(&milliseconds, start, stop);
+	printf("Execution time (GPU): %f (ms)\n", milliseconds);
 	float* output = (float*) malloc(sizeof(float)*N);
 	checkCudaErrors(cudaMemcpy(output, vectors_d[NCASCADING],sizeof(float)*N,cudaMemcpyDeviceToHost));
 	printf("Errors: %d\n",verify_saxpy<NCASCADING,N>(output, input));
@@ -286,12 +310,22 @@ int __main2() {
 
 int main2() {
 	cudaFuncSetCacheConfig(shortKernel_merged<NUM_PARTITION, NUM_CASCADING, N>, cudaFuncCachePreferShared);
-	return __main2<NUM_PARTITION, NUM_CASCADING, false>();
+	return __main2<NUM_PARTITION, NUM_CASCADING, false, false>();
 }
 
 int main5() {
 	cudaFuncSetCacheConfig(shortKernel_merged<NUM_PARTITION, NUM_CASCADING, N>, cudaFuncCachePreferShared);
-	return __main2<NUM_PARTITION, NUM_CASCADING, true>();
+	return __main2<NUM_PARTITION, NUM_CASCADING, true, false>();
+}
+
+int main6() {
+	cudaFuncSetCacheConfig(shortKernel_merged<NUM_PARTITION, NUM_CASCADING, N>, cudaFuncCachePreferShared);
+	return __main2<NUM_PARTITION, NUM_CASCADING, false, true>();
+}
+
+int main7() {
+	cudaFuncSetCacheConfig(shortKernel_merged<1, NUM_CASCADING, N>, cudaFuncCachePreferShared);
+	return __main2<1, NUM_CASCADING, false, true>();
 }
 
 int main(int argc, char** argv) {
@@ -309,7 +343,7 @@ int main(int argc, char** argv) {
 	int gpumethod = -1;
 	if (checkCmdLineFlag(argc, (const char**)argv, "gpumethod")) {
 		gpumethod = getCmdLineArgumentInt(argc, (const char**)argv, "gpumethod");
-		if (gpumethod < 0 || gpumethod > 5) {
+		if (gpumethod < 0 || gpumethod > 7) {
 			printf("Error: gpumethod must be 0 or 1 or 2 or 3 or 4, gpumethod = %d is invalid\n", gpumethod);
 			exit(EXIT_SUCCESS);
 		}
@@ -336,6 +370,12 @@ int main(int argc, char** argv) {
 		break;
 	case 5:
 		main5();
+		break;
+	case 6:
+		main6();
+		break;
+	case 7:
+		main7();
 		break;
 	}
 	sdkStopTimer(&timer);
