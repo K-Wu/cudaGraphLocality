@@ -20,6 +20,21 @@
 
 
 #include <cstdlib>
+#include <cmath>
+
+template <int NCASCADING, int NLEN>
+int verify_saxpy(float* output, float* input){
+	float timer = pow(1.23, NCASCADING);
+	int result = 0;
+	for (size_t idx=0;idx<NLEN;idx++){
+		if(abs(output[idx]-input[idx]*timer)>0.000002){
+			printf("Error: %lu %f %f!\n",idx, output[idx], input[idx]*timer);
+			result++;
+		}
+	}
+	return result;
+}
+
 void random_initialize(float* arr, size_t len)
 {
 	for (size_t idx = 0; idx < len; idx++)
@@ -51,9 +66,9 @@ __global__ void shortKernel(float* vector_d, float* in_d) {
 
 template <int NPARTITION, int NCASCADING, int NLEN>
 __global__ void shortKernel_merged(float* vectors_d[NCASCADING+1], int ipartition) {
-	int idx = blockIdx.x * blockDim.x + threadIdx.x +ipartition*NLEN/NPARTITION;
+	int idx = blockIdx.x * blockDim.x + threadIdx.x + NLEN/NPARTITION * ipartition;
 	for (int i_cascading = 0; i_cascading < NCASCADING; i_cascading++) {
-		for (int curr_idx = idx; curr_idx < (ipartition+1) *NLEN / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
+		for (int curr_idx = idx; curr_idx < NLEN / NPARTITION * (ipartition+1); curr_idx += blockDim.x * gridDim.x) {
 			vectors_d[i_cascading+1][curr_idx] = 1.23 * vectors_d[i_cascading][curr_idx];
 		}
 	}
@@ -61,9 +76,9 @@ __global__ void shortKernel_merged(float* vectors_d[NCASCADING+1], int ipartitio
 
 template <int NPARTITION, int NCASCADING, int NLEN>
 __global__ void shortKernel_merged_optimized(float* vectors_d[NCASCADING+1], int ipartition) {
-	int idx = blockIdx.x * blockDim.x + threadIdx.x +ipartition*NLEN/NPARTITION;
+	long long idx = blockIdx.x * blockDim.x + threadIdx.x + NLEN/NPARTITION * ipartition;
 	for (int i_cascading = 0; i_cascading < NCASCADING; i_cascading++) {
-		for (int curr_idx = idx; curr_idx < (ipartition+1) *NLEN / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
+		for (int curr_idx = idx; curr_idx < NLEN / NPARTITION * (ipartition+1); curr_idx += blockDim.x * gridDim.x) {
 			__stcg(&vectors_d[i_cascading+1][curr_idx], 1.23 * __ldlu(&vectors_d[i_cascading][curr_idx]));
 		}
 	}
@@ -87,7 +102,7 @@ void resetStreamAccessPolicyWindow(void* param) {
 	attr.accessPolicyWindow.hitProp = cudaAccessPropertyNormal;
 	// Type of access property on cache miss
 	attr.accessPolicyWindow.missProp = cudaAccessPropertyNormal;
-	cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
+	checkCudaErrors(cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr));
 }
 
 template <int NPARTITION, int NCASCADING, bool FLAG_ENABLE_L2_POLICY>
@@ -117,22 +132,26 @@ int __main_01() {
 		std::vector<cudaGraphNode_t> node_dependencies;
 		if (iCascade != 0) {
 #if MY_CUDA_ARCH_IDENTIFIER >= 800
+#ifdef HOST_NODE_CANNOT_EXECUTE_CUDA_FUNCTION
 			if constexpr (FLAG_ENABLE_L2_POLICY) {
 				cudaHostNodeParams hostNodeParams;
 				hostNodeParams.fn = resetStreamAccessPolicyWindow;
 				struct param_resetStreamAccessPolicyWindow host_params;
 				cudaKernelNodeAttrValue last_kernel_node_attribute;
-				cudaGraphKernelNodeGetAttribute(kernel_node[iCascade - 1], cudaKernelNodeAttributeAccessPolicyWindow, &last_kernel_node_attribute);
+				checkCudaErrors(cudaGraphKernelNodeGetAttribute(kernel_node[iCascade - 1], cudaKernelNodeAttributeAccessPolicyWindow, &last_kernel_node_attribute));
 				host_params.accessPolicyWindow = last_kernel_node_attribute.accessPolicyWindow;
 				host_params.stream = stream;
 				hostNodeParams.userData = (void*)&host_params;
 				std::vector<cudaGraphNode_t> host_node_dependencies = { kernel_node[iCascade - 1] };
-				cudaGraphAddHostNode(&host_nodes[iCascade - 1], graph, host_node_dependencies.data(), host_node_dependencies.size(), &hostNodeParams);
+				checkCudaErrors(cudaGraphAddHostNode(&host_nodes[iCascade - 1], graph, host_node_dependencies.data(), host_node_dependencies.size(), &hostNodeParams));
 				node_dependencies.push_back(host_nodes[iCascade - 1]);
 			}
 			else {
+#endif
 				node_dependencies.push_back(kernel_node[iCascade - 1]);
+#ifdef HOST_NODE_CANNOT_EXECUTE_CUDA_FUNCTION
 			}
+#endif
 #else
 			node_dependencies.push_back(kernel_node[iCascade - 1]);
 #endif
@@ -144,7 +163,7 @@ int __main_01() {
 		kernelNodeParams.kernelParams = (void**)&kernelArgsPtr;
 		kernelNodeParams.extra = NULL;
 		kernelNodeParams.sharedMemBytes = 0;
-		cudaGraphAddKernelNode(&kernel_node[iCascade], graph, node_dependencies.data(), node_dependencies.size(), &kernelNodeParams);
+		checkCudaErrors(cudaGraphAddKernelNode(&kernel_node[iCascade], graph, node_dependencies.data(), node_dependencies.size(), &kernelNodeParams));
 		
 	}
 	checkCudaErrors(cudaGraphInstantiate(&instance, graph, NULL, NULL, 0));
@@ -167,15 +186,16 @@ int __main_01() {
 			if constexpr(FLAG_ENABLE_L2_POLICY){
 				cudaKernelNodeAttrValue node_attribute;                                     // Kernel level attributes data structure
 				node_attribute.accessPolicyWindow.base_ptr = reinterpret_cast<void*>(&vector_d[iCascade + 1][N / NPARTITION * ipartition]); // Global Memory data pointer
-				node_attribute.accessPolicyWindow.num_bytes = N / NPARTITION & sizeof(float);                    // Number of bytes for persistence access.
+				node_attribute.accessPolicyWindow.num_bytes = N / NPARTITION * sizeof(float);                    // Number of bytes for persistence access.
 																							// (Must be less than cudaDeviceProp::accessPolicyMaxWindowSize)
 				node_attribute.accessPolicyWindow.hitRatio = 0.6;                          // Hint for cache hit ratio
 				node_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting; // Type of access property on cache hit
 				node_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;  // Type of access property on cache miss.
 
 				//Set the attributes to a CUDA Graph Kernel node of type cudaGraphNode_t
-				cudaGraphKernelNodeSetAttribute(kernel_node[iCascade], cudaKernelNodeAttributeAccessPolicyWindow, &node_attribute);
-
+				checkCudaErrors(cudaGraphKernelNodeSetAttribute(kernel_node[iCascade], cudaKernelNodeAttributeAccessPolicyWindow, &node_attribute));
+				checkCudaErrors(cudaGraphExecKernelNodeSetParams(instance, kernel_node[iCascade], &kernelNodeParams_curr));
+#ifdef HOST_NODE_CANNOT_EXECUTE_CUDA_FUNCTION
 				//TODO: set graph host node attribute
 				if (iCascade != NCASCADING) {
 					struct param_resetStreamAccessPolicyWindow params_host_curr;
@@ -186,6 +206,7 @@ int __main_01() {
 					hostNodeParams.userData = (void*)&params_host_curr;
 					cudaGraphHostNodeSetParams(host_nodes[iCascade], &hostNodeParams);
 				}
+#endif
 			}
 			else {
 				checkCudaErrors(cudaGraphExecKernelNodeSetParams(instance, kernel_node[iCascade], &kernelNodeParams_curr));
@@ -203,6 +224,9 @@ int __main_01() {
 	checkCudaErrors(cudaGraphExecDestroy(instance));
 	checkCudaErrors(cudaGraphDestroy(graph));
 	checkCudaErrors(cudaStreamDestroy(stream));
+	float* output = (float*) malloc(sizeof(float)*N);
+	checkCudaErrors(cudaMemcpy(output, vector_d[NCASCADING],sizeof(float)*N,cudaMemcpyDeviceToHost));
+	printf("Errors: %d\n",verify_saxpy<NCASCADING,N>(output, input));
 	return 0;
 }
 
@@ -244,7 +268,6 @@ int __main2() {
 	sdkCreateTimer(&timerExec);
 	sdkStartTimer(&timerExec);
 	for (int ipartition = 0; ipartition < NPARTITION; ipartition++) {
-		checkCudaErrors(cudaStreamSynchronize(0));
 		if constexpr(FLAG_OPTIMIZATION){
 			shortKernel_merged_optimized<NPARTITION, NUM_CASCADING, N><<<GRIDDIM,1024>>>(vectors_d_d, ipartition);
 		}
@@ -255,6 +278,9 @@ int __main2() {
 	checkCudaErrors(cudaStreamSynchronize(0));
 	sdkStopTimer(&timerExec);
 	printf("Execution time: %f (ms)\n", sdkGetTimerValue(&timerExec));
+	float* output = (float*) malloc(sizeof(float)*N);
+	checkCudaErrors(cudaMemcpy(output, vectors_d[NCASCADING],sizeof(float)*N,cudaMemcpyDeviceToHost));
+	printf("Errors: %d\n",verify_saxpy<NCASCADING,N>(output, input));
 	return 0;
 }
 
