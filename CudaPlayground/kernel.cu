@@ -6,10 +6,18 @@
 #include "helper_timer.h"
 #include "helper_cuda.h"
 #include "helper_string.h"
-#define N 50000000
-//#define NPARTITION 10 // tuned such that kernel takes a few microseconds
+#if MY_CUDA_ARCH_IDENTIFIER >= 800 // assuming 3090
+#define N 85983232
+#define NUM_CASCADING 8
+#define NUM_PARTITION 256 // each arry occupies 2.5625MB
+#define GRIDDIM 82
+#else
+#define N 50000000 //assuming 2070max-q
+#define NUM_CASCADING 10
+#define NUM_PARTITION 150 // tuned such that kernel takes a few microseconds
+#define GRIDDIM 36
+#endif
 
-#define NCASCADING 10
 
 #include <cstdlib>
 void random_initialize(float* arr, size_t len)
@@ -33,21 +41,21 @@ inline void __checkCudaErrors(cudaError_t err, const char* file, int line)
 }
 #define checkCudaErrors(err) (__checkCudaErrors((err),__FILE__,__LINE__))
 
-template <int NPARTITION>
+template <int NPARTITION, int NLEN>
 __global__ void shortKernel(float* vector_d, float* in_d) {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
-	for (int curr_idx = idx; curr_idx < N / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
+	for (int curr_idx = idx; curr_idx < NLEN / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
 		__stcg(&vector_d[curr_idx], 1.23 * __ldlu(&in_d[curr_idx]));
 	}
 }
 
-template <int NPARTITION>
-__global__ void shortKernel_merged(float** vectors_d, int n_cascading) {
+template <int NPARTITION, int NCASCADING, int NLEN>
+__global__ void shortKernel_merged(float* vectors_d[NCASCADING+1]) {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
-	for (int i_cascading = 0; i_cascading < n_cascading; i_cascading++) {
-		for (int curr_idx = idx; curr_idx < N / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
-			vectors_d[i_cascading+1][curr_idx] = 1.23 * vectors_d[i_cascading][curr_idx];
-		}
+	for (int i_cascading = 0; i_cascading < NCASCADING; i_cascading++) {
+		// for (int curr_idx = idx; curr_idx < NLEN / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
+		// 	vectors_d[i_cascading+1][curr_idx] = 1.23 * vectors_d[i_cascading][curr_idx];
+		// }
 	}
 }
 
@@ -72,7 +80,7 @@ void resetStreamAccessPolicyWindow(void* param) {
 	cudaStreamSetAttribute(stream, cudaStreamAttributeAccessPolicyWindow, &attr);
 }
 
-template <int NPARTITION, bool FLAG_ENABLE_L2_POLICY>
+template <int NPARTITION, int NCASCADING, bool FLAG_ENABLE_L2_POLICY>
 int __main_01() {
 	cudaGraph_t graph;
 	cudaGraphExec_t instance;
@@ -98,7 +106,7 @@ int __main_01() {
 	for (int iCascade = 0; iCascade < NCASCADING; iCascade++) {
 		std::vector<cudaGraphNode_t> node_dependencies;
 		if (iCascade != 0) {
-#if __CUDA_ARCH__ >= 800
+#if MY_CUDA_ARCH_IDENTIFIER >= 800
 			if constexpr (FLAG_ENABLE_L2_POLICY) {
 				cudaHostNodeParams hostNodeParams;
 				hostNodeParams.fn = resetStreamAccessPolicyWindow;
@@ -120,8 +128,8 @@ int __main_01() {
 #endif
 		}
 		void* kernelArgsPtr[2] = { (void*)&vector_d[iCascade+1],(void*)&vector_d[iCascade] };
-		kernelNodeParams.func = (void*)shortKernel<NPARTITION>;
-		kernelNodeParams.gridDim = 36;
+		kernelNodeParams.func = (void*)shortKernel<NPARTITION, N>;
+		kernelNodeParams.gridDim = GRIDDIM;
 		kernelNodeParams.blockDim = 1024;
 		kernelNodeParams.kernelParams = (void**)&kernelArgsPtr;
 		kernelNodeParams.extra = NULL;
@@ -139,13 +147,13 @@ int __main_01() {
 			cudaKernelNodeParams kernelNodeParams_curr;
 			float* kernelArgs_curr[2] = { &vector_d[iCascade + 1][N / NPARTITION * ipartition],&vector_d[iCascade][N / NPARTITION * ipartition] };
 			void* kernelArgsPtr_curr[2] = { (void*)&kernelArgs_curr[0], (void*)&kernelArgs_curr[1] };
-			kernelNodeParams_curr.func = (void*)shortKernel<NPARTITION>;
-			kernelNodeParams_curr.gridDim = 36;
+			kernelNodeParams_curr.func = (void*)shortKernel<NPARTITION, N>;
+			kernelNodeParams_curr.gridDim = GRIDDIM;
 			kernelNodeParams_curr.blockDim = 1024;
 			kernelNodeParams_curr.kernelParams = (void**)&kernelArgsPtr_curr;
 			kernelNodeParams_curr.extra = NULL;
 			kernelNodeParams_curr.sharedMemBytes = 0;
-#if __CUDA_ARCH__ >= 800
+#if MY_CUDA_ARCH_IDENTIFIER >= 800
 			if constexpr(FLAG_ENABLE_L2_POLICY){
 				cudaKernelNodeAttrValue node_attribute;                                     // Kernel level attributes data structure
 				node_attribute.accessPolicyWindow.base_ptr = reinterpret_cast<void*>(&vector_d[iCascade + 1][N / NPARTITION * ipartition]); // Global Memory data pointer
@@ -172,8 +180,9 @@ int __main_01() {
 			else {
 				checkCudaErrors(cudaGraphExecKernelNodeSetParams(instance, kernel_node[iCascade], &kernelNodeParams_curr));
 			}
-#endif
+#else
 			checkCudaErrors(cudaGraphExecKernelNodeSetParams(instance, kernel_node[iCascade], &kernelNodeParams_curr));
+#endif
 		}
 		checkCudaErrors(cudaGraphLaunch(instance, stream));
 		checkCudaErrors(cudaStreamSynchronize(stream));
@@ -188,26 +197,26 @@ int __main_01() {
 }
 
 int main0() {
-	cudaFuncSetCacheConfig(shortKernel<125>, cudaFuncCachePreferShared);
-	return __main_01<125, false>();
+	cudaFuncSetCacheConfig(shortKernel<NUM_PARTITION, N>, cudaFuncCachePreferShared);
+	return __main_01<NUM_PARTITION, NUM_CASCADING, false>();
 }
 
 int main1() {
-	cudaFuncSetCacheConfig(shortKernel<1>, cudaFuncCachePreferShared);
-	return __main_01<1, false>();
+	cudaFuncSetCacheConfig(shortKernel<1, N>, cudaFuncCachePreferShared);
+	return __main_01<1, NUM_CASCADING, false>();
 }
 
 int main3() {
-	cudaFuncSetCacheConfig(shortKernel<125>, cudaFuncCachePreferShared);
-	return __main_01<125, true>();
+	cudaFuncSetCacheConfig(shortKernel<NUM_PARTITION, N>, cudaFuncCachePreferShared);
+	return __main_01<NUM_PARTITION, NUM_CASCADING, true>();
 }
 
 int main4() {
-	cudaFuncSetCacheConfig(shortKernel<1>, cudaFuncCachePreferShared);
-	return __main_01<1, true>();
+	cudaFuncSetCacheConfig(shortKernel<1, N>, cudaFuncCachePreferShared);
+	return __main_01<1, NUM_CASCADING, true>();
 }
 
-template <int NPARTITION>
+template <int NPARTITION, int NCASCADING>
 int __main2() {
 	float* input;
 	input = (float*)malloc(sizeof(float) * N);
@@ -222,8 +231,12 @@ int __main2() {
 	sdkCreateTimer(&timerExec);
 	sdkStartTimer(&timerExec);
 	for (int ipartition = 1; ipartition < NPARTITION; ipartition++) {
-
-		shortKernel_merged<NPARTITION><<<36,1024>>>(vectors_d,NCASCADING);
+		float* vectors_d_curr[NCASCADING + 1];
+		for (int idx=0;idx<NCASCADING+1;idx++){
+			vectors_d_curr[idx]=&(vectors_d[idx][ipartition*N/NPARTITION]);
+		}
+		checkCudaErrors(cudaStreamSynchronize(0));
+		shortKernel_merged<NPARTITION, NUM_CASCADING, N><<<GRIDDIM,1024>>>(vectors_d_curr);
 	}
 	checkCudaErrors(cudaStreamSynchronize(0));
 	sdkStopTimer(&timerExec);
@@ -232,11 +245,14 @@ int __main2() {
 }
 
 int main2() {
-	cudaFuncSetCacheConfig(shortKernel_merged<500>, cudaFuncCachePreferShared);
-	return __main2<125>();
+	cudaFuncSetCacheConfig(shortKernel_merged<NUM_PARTITION, NUM_CASCADING, N>, cudaFuncCachePreferShared);
+	return __main2<NUM_PARTITION, NUM_CASCADING>();
 }
 
 int main(int argc, char** argv) {
+	#if MY_CUDA_ARCH_IDENTIFIER >= 800 
+		printf("cuda arch >= 800\n");
+	#endif
 	if (checkCmdLineFlag(argc, (const char**)argv, "help")) {
 		printf("Command line: jacobiCudaGraphs [-option]\n");
 		printf("Valid options:\n");
@@ -245,7 +261,7 @@ int main(int argc, char** argv) {
 		printf("                       : 1 - CUDA Graph\n");
 		printf("                       : 2 - Non CUDA Graph\n");
 	}
-	int gpumethod = 0;
+	int gpumethod = -1;
 	if (checkCmdLineFlag(argc, (const char**)argv, "gpumethod")) {
 		gpumethod = getCmdLineArgumentInt(argc, (const char**)argv, "gpumethod");
 		if (gpumethod < 0 || gpumethod > 4) {
