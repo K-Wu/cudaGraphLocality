@@ -50,12 +50,22 @@ __global__ void shortKernel(float* vector_d, float* in_d) {
 }
 
 template <int NPARTITION, int NCASCADING, int NLEN>
-__global__ void shortKernel_merged(float* vectors_d[NCASCADING+1]) {
-	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+__global__ void shortKernel_merged(float* vectors_d[NCASCADING+1], int ipartition) {
+	int idx = blockIdx.x * blockDim.x + threadIdx.x +ipartition*N/NPARTITION;
 	for (int i_cascading = 0; i_cascading < NCASCADING; i_cascading++) {
-		// for (int curr_idx = idx; curr_idx < NLEN / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
-		// 	vectors_d[i_cascading+1][curr_idx] = 1.23 * vectors_d[i_cascading][curr_idx];
-		// }
+		for (int curr_idx = idx; curr_idx < NLEN *N / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
+			vectors_d[i_cascading+1][curr_idx] = 1.23 * vectors_d[i_cascading][curr_idx];
+		}
+	}
+}
+
+template <int NPARTITION, int NCASCADING, int NLEN>
+__global__ void shortKernel_merged_optimized(float* vectors_d[NCASCADING+1], int ipartition) {
+	int idx = blockIdx.x * blockDim.x + threadIdx.x +ipartition*N/NPARTITION;
+	for (int i_cascading = 0; i_cascading < NCASCADING; i_cascading++) {
+		for (int curr_idx = idx; curr_idx < NLEN *N / NPARTITION; curr_idx += blockDim.x * gridDim.x) {
+			__stcg(&vectors_d[i_cascading+1][curr_idx], 1.23 * __ldlu(&vectors_d[i_cascading][curr_idx]));
+		}
 	}
 }
 
@@ -216,27 +226,31 @@ int main4() {
 	return __main_01<1, NUM_CASCADING, true>();
 }
 
-template <int NPARTITION, int NCASCADING>
+template <int NPARTITION, int NCASCADING, bool FLAG_OPTIMIZATION>
 int __main2() {
 	float* input;
 	input = (float*)malloc(sizeof(float) * N);
 	random_initialize(input, N);
 	float* vectors_d[NCASCADING + 1];
+	float** vectors_d_d;
 	for (int idx = 0; idx < NCASCADING + 1; idx++) {
 		checkCudaErrors(cudaMalloc(&vectors_d[idx], sizeof(float) * N));
 	}
+	checkCudaErrors(cudaMalloc(&vectors_d_d, sizeof(float*)*(NCASCADING+1)));
 	checkCudaErrors(cudaMemcpy(vectors_d[0], input, sizeof(float) * N, cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMemcpy(vectors_d_d, vectors_d, sizeof(float*) * (NCASCADING + 1), cudaMemcpyHostToDevice));
 	checkCudaErrors(cudaStreamSynchronize(0));
 	StopWatchInterface* timerExec = NULL;
 	sdkCreateTimer(&timerExec);
 	sdkStartTimer(&timerExec);
 	for (int ipartition = 1; ipartition < NPARTITION; ipartition++) {
-		float* vectors_d_curr[NCASCADING + 1];
-		for (int idx=0;idx<NCASCADING+1;idx++){
-			vectors_d_curr[idx]=&(vectors_d[idx][ipartition*N/NPARTITION]);
-		}
 		checkCudaErrors(cudaStreamSynchronize(0));
-		shortKernel_merged<NPARTITION, NUM_CASCADING, N><<<GRIDDIM,1024>>>(vectors_d_curr);
+		if constexpr(FLAG_OPTIMIZATION){
+			shortKernel_merged_optimized<NPARTITION, NUM_CASCADING, N><<<GRIDDIM,1024>>>(vectors_d_d, ipartition);
+		}
+		else{
+			shortKernel_merged<NPARTITION, NUM_CASCADING, N><<<GRIDDIM,1024>>>(vectors_d_d, ipartition);
+		}
 	}
 	checkCudaErrors(cudaStreamSynchronize(0));
 	sdkStopTimer(&timerExec);
@@ -246,7 +260,12 @@ int __main2() {
 
 int main2() {
 	cudaFuncSetCacheConfig(shortKernel_merged<NUM_PARTITION, NUM_CASCADING, N>, cudaFuncCachePreferShared);
-	return __main2<NUM_PARTITION, NUM_CASCADING>();
+	return __main2<NUM_PARTITION, NUM_CASCADING, false>();
+}
+
+int main5() {
+	cudaFuncSetCacheConfig(shortKernel_merged<NUM_PARTITION, NUM_CASCADING, N>, cudaFuncCachePreferShared);
+	return __main2<NUM_PARTITION, NUM_CASCADING, true>();
 }
 
 int main(int argc, char** argv) {
@@ -264,7 +283,7 @@ int main(int argc, char** argv) {
 	int gpumethod = -1;
 	if (checkCmdLineFlag(argc, (const char**)argv, "gpumethod")) {
 		gpumethod = getCmdLineArgumentInt(argc, (const char**)argv, "gpumethod");
-		if (gpumethod < 0 || gpumethod > 4) {
+		if (gpumethod < 0 || gpumethod > 5) {
 			printf("Error: gpumethod must be 0 or 1 or 2 or 3 or 4, gpumethod = %d is invalid\n", gpumethod);
 			exit(EXIT_SUCCESS);
 		}
@@ -288,6 +307,9 @@ int main(int argc, char** argv) {
 		break;
 	case 4:
 		main4();
+		break;
+	case 5:
+		main5();
 		break;
 	}
 	sdkStopTimer(&timer);
