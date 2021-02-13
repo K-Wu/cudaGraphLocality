@@ -1,1 +1,2 @@
-nvcc -expt-relaxed-constexpr -std=c++17 -O3 -DMY_CUDA_ARCH_IDENTIFIER=800 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=compute_86 -o kernel kernel.cu
+nvcc -expt-relaxed-constexpr -std=c++17 -O3 -DMY_CUDA_ARCH_IDENTIFIER=800 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=compute_86 --resource-usage -o kernel kernel.cu
+nvcc -expt-relaxed-constexpr -std=c++17 -O3 -DMY_CUDA_ARCH_IDENTIFIER=800 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=compute_86 -Xptxas -dlcm=cg -o kernel_cg kernel.cu
