@@ -5,3 +5,5 @@ kernel
 *.ptx
 *.sass
 kernel_cg
+*.qdrep
+*.sqlite
