@@ -9,7 +9,7 @@
 #if MY_CUDA_ARCH_IDENTIFIER >= 800 // assuming 3090
 #define N 687865856
 #define NUM_CASCADING 8
-#define NUM_PARTITION 4096 // each arry occupies 1.28125MB
+#define NUM_PARTITION 256 // each arry occupies 1.28125MB
 #define GRIDDIM 82
 #define BLOCK_THREADNUM 1024
 #define GRIDDIMY 1
@@ -223,6 +223,7 @@ __global__ void shortKernel_merged_optimized(float *vectors_d[NCASCADING + 1], c
 		for (int curr_idx = idx + (blockIdx.y) * (NLEN / NPARTITION / gridDim.y); curr_idx < NLEN / NPARTITION * (ipartition) + (blockIdx.y + 1) * (NLEN / NPARTITION / gridDim.y); curr_idx += blockDim.x * gridDim.x)
 		{
 			__stcg(&vectors_d[i_cascading + 1][curr_idx], 1.23 * __ldlu(&vectors_d[i_cascading][curr_idx]));
+			// vectors_d[i_cascading + 1][curr_idx]=1.23*vectors_d[i_cascading][curr_idx];
 		}
 	}
 }
@@ -560,4 +561,21 @@ int main(int argc, char **argv)
 	}
 	sdkStopTimer(&timer);
 	printf("Processing time: %f (ms)\n", sdkGetTimerValue(&timer));
+}
+
+
+int main2(int argc, char** argv)
+{
+	StopWatchInterface* timer = NULL;
+	sdkCreateTimer(&timer);
+	sdkStartTimer(&timer);
+	main2();
+	sdkStopTimer(&timer);
+	printf("Processing time: %f (ms)\n", sdkGetTimerValue(&timer));
+	StopWatchInterface* timer2 = NULL;
+	sdkCreateTimer(&timer2);
+	sdkStartTimer(&timer2);
+	main6();
+	sdkStopTimer(&timer2);
+	printf("Processing time: %f (ms)\n", sdkGetTimerValue(&timer2));
 }
