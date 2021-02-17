@@ -9,10 +9,10 @@
 #if MY_CUDA_ARCH_IDENTIFIER >= 800 // assuming 3090
 #define N 687865856
 #define NUM_CASCADING 8
-#define NUM_PARTITION 8 // each arry occupies 1.28125MB
+#define NUM_PARTITION 4096 // each arry occupies 1.28125MB
 #define GRIDDIM 82
 #define BLOCK_THREADNUM 1024
-#define GRIDDIMY 64
+#define GRIDDIMY 1
 #else
 #define N 50000000 //assuming 2070max-q
 #define NUM_CASCADING 10
@@ -145,19 +145,68 @@ __global__ void shortKernel(float *__restrict__ vector_d, const float *__restric
 		shortKernel_nonprefetch<NPARTITION, NLEN>(vector_d, in_d);
 	}
 }
+template <bool iterShared, bool first_stage, bool last_stage>
+__device__ __forceinline__ void _shortKernel_merged_loop(float *output, const float  *input, const int ipartition, int iterIdx, int curr_idx, float* temp_storage)
+{
+	if constexpr (iterShared)
+	{
+		if (first_stage)
+		{
+			temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x] = 1.23 * input[curr_idx];
+		}
+		else if (last_stage)
+		{
+			output[curr_idx] = 1.23 * temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x];
+		}
+		else
+		{
+			temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x] = 1.23 * temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x];
+		}
+	}
+	else
+	{
+		output[curr_idx] = 1.23 * input[curr_idx];
+	}
+}
 
 template <int NPARTITION, int NCASCADING, int NLEN>
 __global__ void shortKernel_merged(float *vectors_d[NCASCADING + 1], const int ipartition)
 {
 	//__builtin_assume(blockDim.x*gridDim.x==BLOCK_THREADNUM);
-
+	__shared__ float temp_storage[12 * BLOCK_THREADNUM];
 	int idx = blockIdx.x * blockDim.x + threadIdx.x + NLEN / NPARTITION * ipartition;
-#pragma unroll
-	for (int i_cascading = 0; i_cascading < NCASCADING; i_cascading++)
 	{
-		for (int curr_idx = idx + blockIdx.y * (NLEN / NPARTITION / gridDim.y); curr_idx < NLEN / NPARTITION * (ipartition) + (blockIdx.y + 1) * (NLEN / NPARTITION / gridDim.y); curr_idx += blockDim.x * gridDim.x)
+		int iterIdx = 0, curr_idx = idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY);
+		for (; iterIdx < 12; curr_idx += BLOCK_THREADNUM * GRIDDIM, iterIdx++)
 		{
-			vectors_d[i_cascading + 1][curr_idx] = 1.23 * vectors_d[i_cascading][curr_idx];
+			_shortKernel_merged_loop<true, true, false>(vectors_d[0 + 1], vectors_d[0], ipartition, iterIdx, curr_idx, temp_storage);
+		}
+		for (; curr_idx < NLEN / NPARTITION * (ipartition) + (blockIdx.y + 1) * (NLEN / NPARTITION / GRIDDIMY); curr_idx += BLOCK_THREADNUM * GRIDDIM, iterIdx++)
+		{
+			_shortKernel_merged_loop<false, true, false>(vectors_d[0 + 1], vectors_d[0], ipartition, iterIdx, curr_idx, temp_storage);
+		}
+	}
+	for (int i_cascading = 1; i_cascading < NCASCADING - 1; i_cascading++)
+	{
+		int iterIdx = 0, curr_idx = idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY);
+		for (; iterIdx < 12; curr_idx += BLOCK_THREADNUM * GRIDDIM, iterIdx++)
+		{
+			_shortKernel_merged_loop<true, false, false>(vectors_d[i_cascading + 1], vectors_d[i_cascading], ipartition, iterIdx, curr_idx, temp_storage);
+		}
+		for (; curr_idx < NLEN / NPARTITION * (ipartition) + (blockIdx.y + 1) * (NLEN / NPARTITION / GRIDDIMY); curr_idx += BLOCK_THREADNUM * GRIDDIM, iterIdx++)
+		{
+			_shortKernel_merged_loop<false, false, false>(vectors_d[i_cascading + 1], vectors_d[i_cascading], ipartition, iterIdx, curr_idx, temp_storage);
+		}
+	}
+	{
+		int iterIdx = 0, curr_idx = idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY);
+		for (; iterIdx < 12; curr_idx += BLOCK_THREADNUM * GRIDDIM, iterIdx++)
+		{
+			_shortKernel_merged_loop<true, false, true>(vectors_d[NCASCADING], vectors_d[NCASCADING - 1], ipartition, iterIdx, curr_idx, temp_storage);
+		}
+		for (; curr_idx < NLEN / NPARTITION * (ipartition) + (blockIdx.y + 1) * (NLEN / NPARTITION / GRIDDIMY); curr_idx += BLOCK_THREADNUM * GRIDDIM, iterIdx++)
+		{
+			_shortKernel_merged_loop<false, false, true>(vectors_d[NCASCADING], vectors_d[NCASCADING - 1], ipartition, iterIdx, curr_idx, temp_storage);
 		}
 	}
 }
@@ -449,6 +498,8 @@ int main6()
 
 int main7()
 {
+
+	//cudaFuncSetAttribute(shortKernel_merged<NUM_PARTITION, NUM_CASCADING, N>, cudaFuncAttributeMaxDynamicSharedMemorySize, 98304);
 	//cudaFuncSetCacheConfig(shortKernel<1, NUM_CASCADING, N, false>, cudaFuncCachePreferShared);
 	return __main2<1, NUM_CASCADING, false, false>();
 }
