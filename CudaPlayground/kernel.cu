@@ -27,7 +27,7 @@
 template <int NCASCADING, int NLEN>
 int verify_saxpy(float *output, float *input)
 {
-	float timer = pow(1.23, NCASCADING);
+	float timer = pow(1.23f, NCASCADING);
 	int result = 0;
 	for (size_t idx = 0; idx < NLEN; idx++)
 	{
@@ -67,8 +67,8 @@ __device__ __forceinline__ void shortKernel_nonprefetch(float *__restrict__ vect
 	//#pragma unroll
 	for (int curr_idx = idx; curr_idx < NLEN / NPARTITION / GRIDDIMY; curr_idx += blockDim.x * gridDim.x)
 	{
-		//__stcg(&vector_d[curr_idx], 1.23 * __ldlu(&in_d[curr_idx]));
-		vector_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)] = 1.23 * in_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)];
+		//__stcg(&vector_d[curr_idx], 1.23f * __ldlu(&in_d[curr_idx]));
+		vector_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)] = 1.23f * in_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)];
 	}
 }
 #include <cooperative_groups.h>
@@ -95,17 +95,17 @@ __device__ __forceinline__ void shortKernel_prefetch_2(float *__restrict__ vecto
 	int curr_idx = idx;
 	for (int iter_idx = 1; curr_idx < NLEN / NPARTITION / GRIDDIMY - BLOCK_THREADNUM * GRIDDIM; curr_idx += BLOCK_THREADNUM * GRIDDIM, iter_idx++)
 	{
-		//vector_d[curr_idx]=1.23*temp[ping_pong];
+		//vector_d[curr_idx]=1.23f*temp[ping_pong];
 		ping_pong++;
 		cuda::memcpy_async(block, shared_storage + BLOCK_THREADNUM * (ping_pong % 2), in_d + (BLOCK_THREADNUM * GRIDDIM * iter_idx) + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY), sizeof(float) * block.size(), barrier[ping_pong % 2]);
 		barrier[(ping_pong - 1) % 2].arrive_and_wait();
-		vector_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)] = 1.23 * shared_storage[threadIdx.x + ((ping_pong - 1) % 2) * BLOCK_THREADNUM];
+		vector_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)] = 1.23f * shared_storage[threadIdx.x + ((ping_pong - 1) % 2) * BLOCK_THREADNUM];
 		//shared_storage[idx%BLOCK_THREADNUM+(1-ping_pong%2)*BLOCK_THREADNUM]=in_d[curr_idx+BLOCK_THREADNUM];
 		//temp[(++ping_pong)%2]=in_d[curr_idx+BLOCK_THREADNUM];
 	}
 	barrier[(ping_pong) % 2].arrive_and_wait();
-	//vector_d[curr_idx+BLOCK_THREADNUM]=1.23*temp[ping_pong];
-	vector_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)] = 1.23 * shared_storage[threadIdx.x + (ping_pong % 2) * BLOCK_THREADNUM];
+	//vector_d[curr_idx+BLOCK_THREADNUM]=1.23f*temp[ping_pong];
+	vector_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)] = 1.23f * shared_storage[threadIdx.x + (ping_pong % 2) * BLOCK_THREADNUM];
 }
 
 template <int NPARTITION, int NLEN>
@@ -122,14 +122,14 @@ __device__ __forceinline__ void shortKernel_prefetch(float *__restrict__ vector_
 #pragma unroll 4
 	for (; curr_idx < NLEN / NPARTITION / GRIDDIMY - BLOCK_THREADNUM * GRIDDIM; curr_idx += BLOCK_THREADNUM * GRIDDIM)
 	{
-		//vector_d[curr_idx]=1.23*temp[ping_pong];
+		//vector_d[curr_idx]=1.23f*temp[ping_pong];
 		ping_pong = (1 + ping_pong) % NUM_PINGPONG;
 		//shared_storage[threadIdx.x+ping_pong*BLOCK_THREADNUM]=in_d[curr_idx+blockIdx.x * blockDim.x];
 		temp[ping_pong] = in_d[curr_idx + BLOCK_THREADNUM * GRIDDIM + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)];
-		vector_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)] = 1.23 * temp[(ping_pong + NUM_PINGPONG - 1) % NUM_PINGPONG]; //1.23*shared_storage[threadIdx.x+(1-ping_pong)*BLOCK_THREADNUM];
+		vector_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)] = 1.23f * temp[(ping_pong + NUM_PINGPONG - 1) % NUM_PINGPONG]; //1.23f*shared_storage[threadIdx.x+(1-ping_pong)*BLOCK_THREADNUM];
 	}
-	vector_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)] = 1.23 * temp[ping_pong];
-	//vector_d[curr_idx]=1.23*shared_storage[threadIdx.x+ping_pong*BLOCK_THREADNUM];
+	vector_d[curr_idx + blockIdx.y * (NLEN / NPARTITION / GRIDDIMY)] = 1.23f * temp[ping_pong];
+	//vector_d[curr_idx]=1.23f*shared_storage[threadIdx.x+ping_pong*BLOCK_THREADNUM];
 }
 
 template <int NPARTITION, int NLEN, bool FLAG_PREFETCH>
@@ -152,20 +152,22 @@ __device__ __forceinline__ void _shortKernel_merged_loop(float *output, const fl
 	{
 		if (first_stage)
 		{
-			temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x] = 1.23 * input[curr_idx];
+			temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x] = 1.23f * input[curr_idx];
+			output[curr_idx]=1.23f * input[curr_idx];
 		}
 		else if (last_stage)
 		{
-			output[curr_idx] = 1.23 * temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x];
+			output[curr_idx] = 1.23f * temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x];
 		}
 		else
 		{
-			temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x] = 1.23 * temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x];
+			temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x] = 1.23f * temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x];
+			output[curr_idx]=1.23f * temp_storage[iterIdx * BLOCK_THREADNUM + threadIdx.x];
 		}
 	}
 	else
 	{
-		output[curr_idx] = 1.23 * input[curr_idx];
+		output[curr_idx] = 1.23f * input[curr_idx];
 	}
 }
 
@@ -222,8 +224,8 @@ __global__ void shortKernel_merged_optimized(float *vectors_d[NCASCADING + 1], c
 #pragma unroll
 		for (int curr_idx = idx + (blockIdx.y) * (NLEN / NPARTITION / gridDim.y); curr_idx < NLEN / NPARTITION * (ipartition) + (blockIdx.y + 1) * (NLEN / NPARTITION / gridDim.y); curr_idx += blockDim.x * gridDim.x)
 		{
-			__stcg(&vectors_d[i_cascading + 1][curr_idx], 1.23 * __ldlu(&vectors_d[i_cascading][curr_idx]));
-			// vectors_d[i_cascading + 1][curr_idx]=1.23*vectors_d[i_cascading][curr_idx];
+			//__stcg(&vectors_d[i_cascading + 1][curr_idx], 1.23f * __ldlu(&vectors_d[i_cascading][curr_idx]));
+			vectors_d[i_cascading + 1][curr_idx]=1.23f*vectors_d[i_cascading][curr_idx];
 		}
 	}
 }
